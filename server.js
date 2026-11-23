@@ -16,6 +16,7 @@ const CACHE_TIME = 60 * 1000;
 
 function todayInAlgeria(offset = 0) {
   const now = new Date();
+
   const dateString = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Africa/Algiers",
     year: "numeric",
@@ -59,6 +60,7 @@ async function footballRequest(path, params = {}) {
   const text = await response.text();
 
   let data;
+
   try {
     data = JSON.parse(text);
   } catch {
@@ -69,8 +71,10 @@ async function footballRequest(path, params = {}) {
     const error = new Error(
       data.message || `Highlightly error ${response.status}`
     );
+
     error.status = response.status;
     error.data = data;
+
     throw error;
   }
 
@@ -86,6 +90,7 @@ function getList(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.response)) return data.response;
+
   return [];
 }
 
@@ -141,7 +146,7 @@ app.get("/", (req, res) => {
     name: "AMHAMED FOOTBALL API",
     status: "online",
     provider: "Highlightly",
-    version: "3.0"
+    version: "4.0"
   });
 });
 
@@ -150,7 +155,7 @@ app.get("/api/football", (req, res) => {
     name: "AMHAMED FOOTBALL API",
     status: "online",
     provider: "Highlightly",
-    version: "3.0"
+    version: "4.0"
   });
 });
 
@@ -311,6 +316,7 @@ app.get(
     }
 
     const data = await footballRequest(`/teams/${id}`);
+
     res.json(data);
   })
 );
@@ -376,6 +382,7 @@ app.get(
     };
 
     const data = await footballRequest("/leagues", params);
+
     res.json(data);
   })
 );
@@ -410,23 +417,45 @@ app.get(
 
     if (!id) {
       return res.status(400).json({
+        success: false,
         message: "Match id is required"
       });
     }
 
-    const [match, events, statistics, lineups] =
-      await Promise.all([
-        footballRequest(`/matches/${id}`),
-        footballRequest(`/events/${id}`),
-        footballRequest(`/statistics/${id}`),
-        footballRequest(`/lineups/${id}`)
-      ]);
+    // Get match details
+    const matchResponse = await footballRequest(
+      `/matches/${id}`
+    );
+
+    const match = Array.isArray(matchResponse)
+      ? matchResponse[0]
+      : Array.isArray(matchResponse?.data)
+        ? matchResponse.data[0]
+        : matchResponse?.data || matchResponse;
+
+    // Get lineups separately
+    let lineups = null;
+
+    try {
+      const lineupResponse = await footballRequest(
+        `/lineups/${id}`
+      );
+
+      lineups = lineupResponse?.data || lineupResponse;
+    } catch (error) {
+      console.log(
+        "Lineups not available:",
+        error.message
+      );
+    }
 
     res.json({
+      success: true,
       match,
-      events,
-      statistics,
-      lineups
+      lineups,
+      statistics: match?.statistics || [],
+      events: match?.events || [],
+      clock: match?.state?.clock ?? null
     });
   })
 );
@@ -434,6 +463,7 @@ app.get(
 // Generic error handler
 app.use((err, req, res, next) => {
   console.error(err);
+
   res.status(500).json({
     success: false,
     message: "Internal server error"
@@ -445,4 +475,4 @@ app.listen(PORT, () => {
     `AMHAMED FOOTBALL API running on port ${PORT}`
   );
 });
-            
+  
