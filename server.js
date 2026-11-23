@@ -9,6 +9,7 @@ app.use(express.json());
 const API_KEY = process.env.API_FOOTBALL_KEY;
 const API_URL = "https://v3.football.api-sports.io";
 
+// الاتصال بـ API-Football
 async function footballRequest(endpoint) {
   if (!API_KEY) {
     throw new Error("API key is missing");
@@ -32,11 +33,16 @@ async function footballRequest(endpoint) {
   return data;
 }
 
+// إنشاء روابط الطلبات
 function makeQuery(params) {
   const query = new URLSearchParams();
 
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
+    if (
+      value !== undefined &&
+      value !== null &&
+      value !== ""
+    ) {
       query.set(key, String(value));
     }
   });
@@ -44,11 +50,13 @@ function makeQuery(params) {
   return query.toString();
 }
 
+// التحقق من أرقام المعرفات
 function validId(value) {
   return /^\d+$/.test(String(value || "")) &&
     Number(value) > 0;
 }
 
+// إرسال الأخطاء
 function sendError(res, error, message) {
   console.error(message, error.message);
 
@@ -59,13 +67,64 @@ function sendError(res, error, message) {
   });
 }
 
+// =====================================
+// تخزين المباريات مؤقتاً
+// =====================================
+
+const fixtureCache = new Map();
+
+async function getFixturesByDate(date, filters = {}) {
+  const params = makeQuery({
+    date,
+    team: filters.team,
+    league: filters.league,
+    season: filters.season
+  });
+
+  const cacheKey = params;
+  const cached = fixtureCache.get(cacheKey);
+
+  // صلاحية التخزين 5 دقائق
+  if (
+    cached &&
+    Date.now() - cached.time < 5 * 60 * 1000
+  ) {
+    return cached.data;
+  }
+
+  const data = await footballRequest(
+    `/fixtures?${params}`
+  );
+
+  fixtureCache.set(cacheKey, {
+    data,
+    time: Date.now()
+  });
+
+  return data;
+}
+
+// حساب التاريخ حسب عدد الأيام
+function shiftDate(days) {
+  const date = new Date();
+
+  date.setUTCDate(
+    date.getUTCDate() + days
+  );
+
+  return date.toISOString().slice(0, 10);
+}
+
+// =====================================
 // الصفحة الرئيسية
+// =====================================
+
 app.get("/", (req, res) => {
   res.json({
     name: "AMHAMED FOOTBALL API",
     status: "online",
     message: "Football server is running!",
-    version: "2.0"
+    version: "2.1"
   });
 });
 
@@ -87,47 +146,74 @@ app.get("/api/football", (req, res) => {
   });
 });
 
+// =====================================
 // 1. المباريات المباشرة
+// =====================================
+
 app.get("/api/football/live", async (req, res) => {
   try {
-    const data = await footballRequest("/fixtures?live=all");
+    const data = await footballRequest(
+      "/fixtures?live=all"
+    );
+
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get live matches");
+    sendError(
+      res,
+      error,
+      "Could not get live matches"
+    );
   }
 });
 
+// =====================================
 // 2. مباريات يوم معين
+// مثال: /api/football/fixtures?date=2026-11-23
+// =====================================
+
 app.get("/api/football/fixtures", async (req, res) => {
   try {
     const { date } = req.query;
 
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (
+      !date ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(date)
+    ) {
       return res.status(400).json({
         success: false,
         message: "Enter date as YYYY-MM-DD"
       });
     }
 
-    const data = await footballRequest(
-      `/fixtures?${makeQuery({ date })}`
-    );
+    const data = await getFixturesByDate(date);
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get fixtures");
+    sendError(
+      res,
+      error,
+      "Could not get fixtures"
+    );
   }
 });
 
+// =====================================
 // 3. المباريات القادمة
-// مثال: /api/football/upcoming?next=20
-// مثال: /api/football/upcoming?team=33&next=10
+// باستعمال date بدل next
+// مثال: /api/football/upcoming?next=30
+// =====================================
+
 app.get("/api/football/upcoming", async (req, res) => {
   try {
-    const next = Number(req.query.next || 20);
+    const limit = Number(req.query.next || 30);
+
     const { team, league, season } = req.query;
 
-    if (!Number.isInteger(next) || next < 1 || next > 100) {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
       return res.status(400).json({
         success: false,
         message: "next must be between 1 and 100"
@@ -148,29 +234,82 @@ app.get("/api/football/upcoming", async (req, res) => {
       });
     }
 
-    const data = await footballRequest(
-      `/fixtures?${makeQuery({
-        next,
+    const allMatches = [];
+    const now = Math.floor(Date.now() / 1000);
+
+    // البحث من اليوم إلى 14 يوماً قادماً
+    for (let day = 0; day <= 14; day++) {
+      const date = shiftDate(day);
+
+      const data = await getFixturesByDate(date, {
         team,
         league,
         season
-      })}`
+      });
+
+      const matches = (data.response || []).filter(
+        match =>
+          (match.fixture?.timestamp || 0) >= now
+      );
+
+      allMatches.push(...matches);
+
+      if (allMatches.length >= limit) {
+        break;
+      }
+    }
+
+    // ترتيب المباريات من الأقرب إلى الأبعد
+    allMatches.sort((a, b) =>
+      (a.fixture?.timestamp || 0) -
+      (b.fixture?.timestamp || 0)
     );
 
-    res.json(data);
+    const response = allMatches.slice(0, limit);
+
+    res.json({
+      get: "fixtures",
+      parameters: {
+        next: String(limit),
+        team,
+        league,
+        season
+      },
+      errors: [],
+      results: response.length,
+      paging: {
+        current: 1,
+        total: 1
+      },
+      response
+    });
+
   } catch (error) {
-    sendError(res, error, "Could not get upcoming matches");
+    sendError(
+      res,
+      error,
+      "Could not get upcoming matches"
+    );
   }
 });
 
+// =====================================
 // 4. المباريات السابقة
-// مثال: /api/football/previous?last=20
+// باستعمال date بدل last
+// مثال: /api/football/previous?last=30
+// =====================================
+
 app.get("/api/football/previous", async (req, res) => {
   try {
-    const last = Number(req.query.last || 20);
+    const limit = Number(req.query.last || 30);
+
     const { team, league, season } = req.query;
 
-    if (!Number.isInteger(last) || last < 1 || last > 100) {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
       return res.status(400).json({
         success: false,
         message: "last must be between 1 and 100"
@@ -191,23 +330,81 @@ app.get("/api/football/previous", async (req, res) => {
       });
     }
 
-    const data = await footballRequest(
-      `/fixtures?${makeQuery({
-        last,
+    const allMatches = [];
+    const now = Math.floor(Date.now() / 1000);
+
+    // المباريات المنتهية فقط
+    const finishedStatuses = [
+      "FT",
+      "AET",
+      "PEN",
+      "AWD",
+      "WO"
+    ];
+
+    // البحث من اليوم إلى 14 يوماً في الماضي
+    for (let day = 0; day >= -14; day--) {
+      const date = shiftDate(day);
+
+      const data = await getFixturesByDate(date, {
         team,
         league,
         season
-      })}`
+      });
+
+      const matches = (data.response || []).filter(
+        match =>
+          (match.fixture?.timestamp || 0) < now &&
+          finishedStatuses.includes(
+            match.fixture?.status?.short
+          )
+      );
+
+      allMatches.push(...matches);
+
+      if (allMatches.length >= limit) {
+        break;
+      }
+    }
+
+    // ترتيب الأحدث أولاً
+    allMatches.sort((a, b) =>
+      (b.fixture?.timestamp || 0) -
+      (a.fixture?.timestamp || 0)
     );
 
-    res.json(data);
+    const response = allMatches.slice(0, limit);
+
+    res.json({
+      get: "fixtures",
+      parameters: {
+        last: String(limit),
+        team,
+        league,
+        season
+      },
+      errors: [],
+      results: response.length,
+      paging: {
+        current: 1,
+        total: 1
+      },
+      response
+    });
+
   } catch (error) {
-    sendError(res, error, "Could not get previous matches");
+    sendError(
+      res,
+      error,
+      "Could not get previous matches"
+    );
   }
 });
 
+// =====================================
 // 5. البحث عن الفرق والأندية
-// مثال: /api/football/teams/search?q=Real
+// =====================================
+
 app.get("/api/football/teams/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -225,12 +422,18 @@ app.get("/api/football/teams/search", async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not search teams");
+    sendError(
+      res,
+      error,
+      "Could not search teams"
+    );
   }
 });
 
+// =====================================
 // 6. معلومات فريق محدد
-// مثال: /api/football/team?id=33
+// =====================================
+
 app.get("/api/football/team", async (req, res) => {
   try {
     const { id, season } = req.query;
@@ -248,16 +451,25 @@ app.get("/api/football/team", async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get team information");
+    sendError(
+      res,
+      error,
+      "Could not get team information"
+    );
   }
 });
 
+// =====================================
 // 7. البحث عن اللاعبين
-// مثال: /api/football/players/search?q=Messi&season=2026
+// =====================================
+
 app.get("/api/football/players/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
-    const season = req.query.season || new Date().getFullYear();
+
+    const season =
+      req.query.season || new Date().getFullYear();
+
     const page = Number(req.query.page || 1);
 
     if (q.length < 3) {
@@ -267,7 +479,10 @@ app.get("/api/football/players/search", async (req, res) => {
       });
     }
 
-    if (!Number.isInteger(page) || page < 1) {
+    if (
+      !Number.isInteger(page) ||
+      page < 1
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid page"
@@ -275,21 +490,34 @@ app.get("/api/football/players/search", async (req, res) => {
     }
 
     const data = await footballRequest(
-      `/players?${makeQuery({ search: q, season, page })}`
+      `/players?${makeQuery({
+        search: q,
+        season,
+        page
+      })}`
     );
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not search players");
+    sendError(
+      res,
+      error,
+      "Could not search players"
+    );
   }
 });
 
+// =====================================
 // 8. لاعبو فريق معين
-// مثال: /api/football/players?team=33&season=2026
+// =====================================
+
 app.get("/api/football/players", async (req, res) => {
   try {
     const { team } = req.query;
-    const season = req.query.season || new Date().getFullYear();
+
+    const season =
+      req.query.season || new Date().getFullYear();
+
     const page = Number(req.query.page || 1);
 
     if (!validId(team)) {
@@ -299,7 +527,10 @@ app.get("/api/football/players", async (req, res) => {
       });
     }
 
-    if (!Number.isInteger(page) || page < 1) {
+    if (
+      !Number.isInteger(page) ||
+      page < 1
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid page"
@@ -307,40 +538,59 @@ app.get("/api/football/players", async (req, res) => {
     }
 
     const data = await footballRequest(
-      `/players?${makeQuery({ team, season, page })}`
+      `/players?${makeQuery({
+        team,
+        season,
+        page
+      })}`
     );
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get team players");
+    sendError(
+      res,
+      error,
+      "Could not get team players"
+    );
   }
 });
 
+// =====================================
 // 9. البحث عن المنتخبات الوطنية
-// مثال: /api/football/national-teams/search?q=Algeria
-app.get("/api/football/national-teams/search", async (req, res) => {
-  try {
-    const q = String(req.query.q || "").trim();
+// =====================================
 
-    if (q.length < 3) {
-      return res.status(400).json({
-        success: false,
-        message: "Enter at least 3 characters"
-      });
+app.get(
+  "/api/football/national-teams/search",
+  async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim();
+
+      if (q.length < 3) {
+        return res.status(400).json({
+          success: false,
+          message: "Enter at least 3 characters"
+        });
+      }
+
+      const data = await footballRequest(
+        `/teams?${makeQuery({ search: q })}`
+      );
+
+      res.json(data);
+    } catch (error) {
+      sendError(
+        res,
+        error,
+        "Could not search national teams"
+      );
     }
-
-    const data = await footballRequest(
-      `/teams?${makeQuery({ search: q })}`
-    );
-
-    res.json(data);
-  } catch (error) {
-    sendError(res, error, "Could not search national teams");
   }
-});
+);
 
-// 10. البلدان المتوفرة في API
-// مثال: /api/football/countries?search=Algeria
+// =====================================
+// 10. البلدان المتوفرة
+// =====================================
+
 app.get("/api/football/countries", async (req, res) => {
   try {
     const data = await footballRequest(
@@ -351,12 +601,18 @@ app.get("/api/football/countries", async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get countries");
+    sendError(
+      res,
+      error,
+      "Could not get countries"
+    );
   }
 });
 
-// 11. البحث عن الدوريات
-// مثال: /api/football/leagues?search=Premier League
+// =====================================
+// 11. البحث عن الدوريات والبطولات
+// =====================================
+
 app.get("/api/football/leagues", async (req, res) => {
   try {
     const data = await footballRequest(
@@ -369,12 +625,18 @@ app.get("/api/football/leagues", async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get leagues");
+    sendError(
+      res,
+      error,
+      "Could not get leagues"
+    );
   }
 });
 
+// =====================================
 // 12. ترتيب الدوري
-// مثال: /api/football/standings?league=39&season=2026
+// =====================================
+
 app.get("/api/football/standings", async (req, res) => {
   try {
     const { league, season } = req.query;
@@ -387,16 +649,27 @@ app.get("/api/football/standings", async (req, res) => {
     }
 
     const data = await footballRequest(
-      `/standings?${makeQuery({ league, season })}`
+      `/standings?${makeQuery({
+        league,
+        season
+      })}`
     );
 
     res.json(data);
   } catch (error) {
-    sendError(res, error, "Could not get standings");
+    sendError(
+      res,
+      error,
+      "Could not get standings"
+    );
   }
 });
 
+// =====================================
 // 13. تفاصيل المباراة
+// الأحداث والإحصائيات والتشكيلات
+// =====================================
+
 app.get("/api/football/details", async (req, res) => {
   try {
     const id = req.query.id;
@@ -410,13 +683,25 @@ app.get("/api/football/details", async (req, res) => {
 
     const fixtureId = Number(id);
 
-    const [fixture, events, statistics, lineups] =
-      await Promise.all([
-        footballRequest(`/fixtures?id=${fixtureId}`),
-        footballRequest(`/fixtures/events?fixture=${fixtureId}`),
-        footballRequest(`/fixtures/statistics?fixture=${fixtureId}`),
-        footballRequest(`/fixtures/lineups?fixture=${fixtureId}`)
-      ]);
+    const [
+      fixture,
+      events,
+      statistics,
+      lineups
+    ] = await Promise.all([
+      footballRequest(
+        `/fixtures?id=${fixtureId}`
+      ),
+      footballRequest(
+        `/fixtures/events?fixture=${fixtureId}`
+      ),
+      footballRequest(
+        `/fixtures/statistics?fixture=${fixtureId}`
+      ),
+      footballRequest(
+        `/fixtures/lineups?fixture=${fixtureId}`
+      )
+    ]);
 
     res.json({
       success: true,
@@ -431,15 +716,25 @@ app.get("/api/football/details", async (req, res) => {
         lineups: lineups.errors || []
       }
     });
+
   } catch (error) {
-    sendError(res, error, "Could not get match details");
+    sendError(
+      res,
+      error,
+      "Could not get match details"
+    );
   }
 });
 
+// =====================================
 // تشغيل الخادم
+// =====================================
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`AMHAMED FOOTBALL API running on port ${PORT}`);
+  console.log(
+    `AMHAMED FOOTBALL API running on port ${PORT}`
+  );
 });
   
